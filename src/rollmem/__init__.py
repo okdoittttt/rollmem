@@ -1,7 +1,7 @@
 """rollmem — standalone rolling conversation memory (summary + buffer)."""
 
 from .memory import RollingMemory, SummarizeFn, TokenCounter
-from .message import AI, SYSTEM, USER, Message
+from .message import ASSISTANT, SYSTEM, USER, Message
 
 __all__ = [
     "RollingMemory",
@@ -9,7 +9,7 @@ __all__ = [
     "SummarizeFn",
     "TokenCounter",
     "USER",
-    "AI",
+    "ASSISTANT",
     "SYSTEM",
 ]
 

@@ -45,24 +45,52 @@ mem = RollingMemory(
 )
 
 mem.add_user_message("Hi, I'm planning a trip to Korea.")
-mem.add_ai_message("Great! When are you going?")
+mem.add_assistant_message("Great! When are you going?")
 
 print(mem.get_context())    # -> str: summary (if any) + recent buffer, joined
 print(mem.get_messages())   # -> list[Message]: summary prepended as a system turn
 ```
 
+`max_tokens` is the budget for the **verbatim recent-message buffer** — not the
+running summary, and not a model's generation `max_tokens` (output limit). When
+the buffer exceeds it, the oldest turns are folded into the summary.
+
 `token_counter` takes a single message's text (`str`) and returns an `int`. The
 default is a crude word count — fine for demos, but pass a model-accurate counter
 (such as `tiktoken`) for real token budgets.
+
+## Persistence
+
+`to_dict()` / `from_dict()` serialize the memory **state** (running summary plus
+buffer) to and from a plain `dict` — you choose the storage format:
+
+```python
+import json
+
+raw = json.dumps(mem.to_dict())   # save anywhere: file, DB column, cache...
+
+mem = RollingMemory.from_dict(
+    json.loads(raw),
+    max_tokens=2000,
+    summarize_fn=summarize,        # callbacks are NOT serialized — re-inject them
+    # token_counter=...
+)
+```
+
+`max_tokens` and the callbacks are runtime configuration, not saved state, so you
+pass them again on restore. The buffer is restored verbatim; the token budget is
+re-applied on the next added message.
 
 ## How it works
 
 - New turns go into `buffer`.
 - When `buffer` exceeds `max_tokens`, the oldest turns are folded into `summary`
   via `summarize_fn` (or dropped if none is provided).
-- `get_context() -> str` returns the summary and buffer joined into one string
-  (prompt-ready); `get_messages() -> list[Message]` returns the buffer with the
-  summary prepended as a `system` turn.
+- `get_messages() -> list[Message]` returns the buffer with the summary
+  prepended as a `system` turn. `get_context() -> str` is the string form of
+  the same thing (prompt-ready), so the two never diverge. Neither adds a
+  language-specific label — relabel the summary in your own prompt assembly if
+  you need to.
 
 ## Limitations
 
@@ -70,10 +98,17 @@ default is a crude word count — fine for demos, but pass a model-accurate coun
   each pass can blur or drop detail (a "telephone game" effect). Keep
   `max_tokens` large enough that anything you can't afford to lose stays in the
   verbatim buffer.
+- **The summary is not bounded for you.** `max_tokens` limits only the verbatim
+  buffer, not the running summary. rollmem hands your `summarize_fn` the current
+  summary plus the evicted turns and stores whatever it returns — so keeping the
+  summary compact is your `summarize_fn`'s job. If it merely concatenates,
+  the summary (and thus `get_context()`) grows without limit. Prompt it to
+  compress, or cap the summary length inside the callback.
 - **Only as accurate as your counter.** The default token counter is a rough
   word count; inject a model-accurate one (e.g. `tiktoken`) for real budgets.
-- **No built-in persistence.** State lives in memory. To save and restore across
-  sessions, serialize `summary` and `buffer` yourself.
+- **In-memory by default.** State lives in memory, but `to_dict()` / `from_dict()`
+  let you persist and restore it (see [Persistence](#persistence)). Callbacks are
+  not serialized and must be re-injected on restore.
 
 ## License
 
