@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rollmem"
+version = "0.0.1"
+description = "Standalone, dependency-free rolling conversation memory (summary + buffer), inspired by LangChain's ConversationSummaryBufferMemory."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "son okmoo", email = "omson@datco.kr" },
+]
+keywords = ["llm", "memory", "conversation", "summary", "chatbot", "rag", "langchain"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/okdoittttt/rollmem"
+Repository = "https://github.com/okdoittttt/rollmem"
+Issues = "https://github.com/okdoittttt/rollmem/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "build",
+    "twine",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rollmem"]
