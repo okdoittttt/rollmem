@@ -2,6 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/rollmem.svg)](https://pypi.org/project/rollmem/)
 [![Python versions](https://img.shields.io/pypi/pyversions/rollmem.svg)](https://pypi.org/project/rollmem/)
+[![Typed](https://img.shields.io/badge/typed-py.typed-blue.svg)](https://peps.python.org/pep-0561/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Standalone, **dependency-free** rolling conversation memory for LLM apps —
@@ -26,6 +27,9 @@ how to count tokens — rollmem stays neutral.
 pip install rollmem
 ```
 
+Requires Python 3.9+. Zero runtime dependencies, and fully typed (ships
+`py.typed`, so your type checker sees the annotations).
+
 ## Usage
 
 ```python
@@ -46,8 +50,9 @@ mem = RollingMemory(
 
 mem.add_user_message("Hi, I'm planning a trip to Korea.")
 mem.add_assistant_message("Great! When are you going?")
+mem.add_message("tool", "weather: sunny")   # any role string works
 
-print(mem.get_context())    # -> str: summary (if any) + recent buffer, joined
+print(mem.get_context())    # -> str: summary (as a system turn) + buffer, joined
 print(mem.get_messages())   # -> list[Message]: summary prepended as a system turn
 ```
 
@@ -92,6 +97,27 @@ re-applied on the next added message.
   language-specific label — relabel the summary in your own prompt assembly if
   you need to.
 
+## API
+
+`RollingMemory(max_tokens=2000, summarize_fn=None, token_counter=None)`
+
+- `add_message(role, content)` — append a turn with **any** role string.
+- `add_user_message` / `add_assistant_message` / `add_system_message` —
+  convenience wrappers over `add_message` using the `USER` / `ASSISTANT` /
+  `SYSTEM` role constants.
+- `get_messages() -> list[Message]` / `get_context() -> str` — read the state
+  back (see [How it works](#how-it-works)).
+- `to_dict()` / `from_dict(data, *, max_tokens=..., summarize_fn=..., token_counter=...)`
+  — serialize and restore (see [Persistence](#persistence)).
+- `clear()` — reset the summary and buffer.
+- `summary: str` and `buffer: list[Message]` — the live state, exposed as plain
+  public attributes.
+
+`Message(role, content)` is the provider-neutral turn type: a frozen dataclass
+with `to_dict()` / `from_dict()` and a `"role: content"` string form. The
+exported role constants are `USER`, `ASSISTANT`, and `SYSTEM` — but any string
+is accepted as a role.
+
 ## Limitations
 
 - **Lossy by design.** Older turns are folded into the summary repeatedly, so
@@ -109,6 +135,13 @@ re-applied on the next added message.
 - **In-memory by default.** State lives in memory, but `to_dict()` / `from_dict()`
   let you persist and restore it (see [Persistence](#persistence)). Callbacks are
   not serialized and must be re-injected on restore.
+
+## Development
+
+```bash
+pip install -e ".[dev]"   # editable install with dev tools (pytest, build, twine)
+pytest                    # run the test suite
+```
 
 ## License
 
