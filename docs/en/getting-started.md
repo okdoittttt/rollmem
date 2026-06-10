@@ -43,8 +43,10 @@ mem.add_message(
 mem.add_tool_message("sunny, 23C", tool_call_id="c1")
 ```
 
-A tool call and its linked results are pruned as one atomic unit, so the
-buffer never starts with an orphaned tool result (see
+A tool call and its linked results are pruned as one atomic unit, and the
+eviction boundary is aligned so that after pruning the buffer never starts
+with an assistant turn, a tool turn, or an orphaned tool result — openings
+most provider APIs reject (see
 [How It Works](how-it-works.md#tool-call-units)).
 
 Without a `summarize_fn`, rollmem is **buffer-only**: once the buffer exceeds

@@ -70,8 +70,10 @@ mem.add_tool_message("sunny, 23C", tool_call_id="c1")
 ```
 
 A tool call and its results are an atomic unit: pruning evicts them together
-or keeps them together, so the buffer never starts with an orphaned tool
-result that a provider API would reject.
+or keeps them together. The eviction boundary is also aligned so that after
+pruning the buffer never starts with an assistant turn, a tool turn, or an
+orphaned tool result — openings most provider APIs reject (Anthropic, for
+example, requires the first message to use the `user` role).
 
 In asyncio applications, use `AsyncRollingMemory` — same behaviour and
 serialization format, but the `add_*` methods are coroutines and
@@ -132,7 +134,8 @@ re-applied on the next added message.
 - When `buffer` exceeds `max_tokens`, the oldest turns are folded into `summary`
   via `summarize_fn` (or dropped if none is provided). Eviction is atomic over
   tool-call units — an assistant message with `tool_calls` and its linked tool
-  results always travel together.
+  results always travel together — and boundary-aligned, so the buffer is kept
+  from starting on a response-like turn whenever possible.
 - `get_messages() -> list[Message]` returns the buffer with the summary
   prepended as a `system` turn. `get_context() -> str` is the string form of
   the same thing (prompt-ready), so the two never diverge. Neither adds a

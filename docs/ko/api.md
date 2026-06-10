@@ -39,8 +39,9 @@ TokenCounter = Callable[[str], int]
 ```
 
 - **`SummarizeFn`** — `summarize_fn(existing_summary, messages_to_fold)`이 새
-  요약을 반환합니다. 정리(pruning) 한 번당, 퇴출되는 모든 메시지를 모아 한
-  번 호출됩니다.
+  요약을 반환합니다. 정리(pruning) 한 번당, 퇴출되는 모든 메시지를 모아
+  정확히 한 번 호출됩니다 — 경계 정렬은 퇴출 묶음을 키울 수는 있어도 호출
+  횟수를 늘리지는 않습니다.
 - **`AsyncSummarizeFn`** — 같은 콜백의 코루틴 형태로, `AsyncRollingMemory`가
   받습니다(일반 `SummarizeFn`도 받습니다). 동기 `RollingMemory`에 코루틴
   함수를 넘기면 `TypeError`가 발생합니다.

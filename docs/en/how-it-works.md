@@ -50,23 +50,36 @@ together:
    oldest-first order, never an error.
 4. Every other message is a single-message unit.
 
-This guarantees `get_messages()` never starts with an orphaned tool result —
-a sequence most provider APIs reject. For conversations without tool calls,
-every message is its own unit and behaviour is unchanged.
+This ensures eviction never splits a tool interaction. For conversations
+without tool calls, every message is its own unit. What the buffer is allowed
+to *start* with after an eviction is handled by boundary alignment, below.
 
 ## The pruning algorithm
 
 Pruning is deliberately conservative:
 
-1. First, compute how many of the oldest units must go — without touching
-   the buffer.
-2. Then summarize all evicted messages in a **single** `summarize_fn` call.
-3. Only after that call succeeds are the messages removed from the buffer.
+1. First, compute how many of the oldest units must go for the buffer to fit
+   the budget — without touching the buffer.
+2. Align that cutoff to a valid opening: if the first surviving message would
+   be **response-like** — an assistant turn, a tool turn, or an orphaned tool
+   result — extend the eviction over whole units up to the first survivor
+   that is not. Histories opening with such a turn are rejected by most
+   provider APIs (Anthropic, for example, requires the first message to use
+   the `user` role). If no valid boundary exists before the last unit,
+   the cutoff from step 1 is kept unchanged — evicting more could not fix
+   the opening, so the context is kept instead.
+3. Then summarize all evicted messages in a **single** `summarize_fn` call.
+4. Only after that call succeeds are the messages removed from the buffer.
 
-This has two practical consequences:
+This has three practical consequences:
 
 - **One summarizer call per prune**, not one per message — cheap even when
-  many turns are evicted at once.
+  many turns are evicted at once. Alignment may enlarge the evicted batch,
+  never the number of calls.
+- **After any eviction, the buffer opens on a valid turn.** It never starts
+  with an assistant message, a tool message, or an orphaned tool result,
+  except in the degenerate case where every remaining unit is response-like
+  (see Limitations).
 - **Failure safety.** If `summarize_fn` raises, the buffer is untouched: no
   turns are lost, and the exception propagates to you.
 
@@ -117,6 +130,17 @@ dependencies. For real budgets, inject a model-accurate counter such as
   the evicted turns and stores whatever it returns — keeping the summary
   compact is your callback's job. If it merely concatenates, the summary (and
   thus `get_context()`) grows without limit.
+- **Boundary alignment is best-effort.** If every unit beyond the token-based
+  cutoff opens with a response-like turn (for example, a long run of
+  assistant messages), no extension happens and the buffer may still start
+  with one. `system` turns and custom role strings are never treated as
+  response-like, so a buffer may open with a mid-conversation `system`
+  message — fine for most APIs, but adapters that hoist `system` turns out of
+  the message list must handle it themselves.
+- **Restored buffers are not realigned.** `from_dict` restores verbatim: a
+  saved buffer that starts with an assistant turn or an orphaned tool result
+  stays that way until the next eviction triggers (see
+  [Persistence](persistence.md)).
 - **Only as accurate as your counter.** The default token counter is a rough
   word count; inject a model-accurate one for real budgets.
 - **No language-specific labels.** The summary is prepended as a bare

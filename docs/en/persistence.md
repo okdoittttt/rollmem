@@ -85,6 +85,9 @@ logic. This means:
 - If you restore with a smaller `max_tokens` than the state was saved with,
   the buffer may momentarily exceed the budget — it is re-applied on the next
   `add_message`.
+- The buffer is not realigned at load time: a saved buffer that starts with
+  an assistant turn or an orphaned tool result is restored as-is, and stays
+  that way until the next eviction triggers.
 
 ## Raises
 

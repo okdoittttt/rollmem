@@ -43,9 +43,10 @@ mem.add_message(
 mem.add_tool_message("sunny, 23C", tool_call_id="c1")
 ```
 
-tool call과 그에 연결된 결과들은 하나의 원자적 유닛으로 정리(pruning)되므로,
-버퍼가 고아 tool 결과로 시작하는 일이 없습니다
-([동작 원리](how-it-works.md#tool-call-units) 참고).
+tool call과 그에 연결된 결과들은 하나의 원자적 유닛으로 정리(pruning)되고,
+퇴출 경계가 정렬되므로 정리 후 버퍼가 assistant 턴, tool 턴, 고아 tool
+결과로 시작하는 일이 없습니다 — 대부분의 프로바이더 API가 거부하는
+시작점입니다([동작 원리](how-it-works.md#tool-call-units) 참고).
 
 `summarize_fn`이 없으면 rollmem은 **버퍼 전용**으로 동작합니다: 버퍼가
 `max_tokens`를 초과하면 가장 오래된 턴이 그냥 버려집니다. 요지를 보존하려면

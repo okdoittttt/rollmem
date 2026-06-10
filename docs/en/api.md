@@ -37,7 +37,9 @@ TokenCounter = Callable[[str], int]
 ```
 
 - **`SummarizeFn`** — `summarize_fn(existing_summary, messages_to_fold)`
-  returns the new summary. Called once per prune with all evicted messages.
+  returns the new summary. Called exactly once per prune, with all evicted
+  messages — boundary alignment may enlarge the evicted batch, never the
+  number of calls.
 - **`AsyncSummarizeFn`** — the coroutine form of the same callback, accepted
   by `AsyncRollingMemory` (which also accepts a plain `SummarizeFn`). Passing
   a coroutine function to the synchronous `RollingMemory` raises `TypeError`.
