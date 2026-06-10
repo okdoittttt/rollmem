@@ -1,6 +1,9 @@
+import asyncio
+import warnings
+
 import pytest
 
-from rollmem import ASSISTANT, TOOL, Message, RollingMemory, ToolCall
+from rollmem import ASSISTANT, TOOL, AsyncRollingMemory, Message, RollingMemory, ToolCall
 
 
 def char_counter(text: str) -> int:
@@ -496,3 +499,208 @@ def test_from_dict_accepts_version_1_payload():
 
     with pytest.raises(ValueError):
         RollingMemory.from_dict({"version": 3, "summary": "", "buffer": []})
+
+
+# -- async memory --------------------------------------------------------
+
+
+async def async_fake_summarizer(existing, evicted):
+    await asyncio.sleep(0)
+    folded = " ".join(m.content for m in evicted)
+    return (existing + " " + folded).strip()
+
+
+def test_async_eviction_folds_into_summary():
+    async def main():
+        calls = []
+
+        async def counting_summarizer(existing, evicted):
+            calls.append([m.content for m in evicted])
+            await asyncio.sleep(0)
+            return (existing + " " + " ".join(m.content for m in evicted)).strip()
+
+        mem = AsyncRollingMemory(
+            max_tokens=4,
+            token_counter=char_counter,
+            summarize_fn=counting_summarizer,
+        )
+        await mem.add_user_message("aa")
+        await mem.add_assistant_message("bb")
+        await mem.add_user_message("cccc")
+
+        # Both evicted messages summarized together: exactly one call.
+        assert calls == [["aa", "bb"]]
+        assert mem.summary == "aa bb"
+        assert [m.content for m in mem.buffer] == ["cccc"]
+
+    asyncio.run(main())
+
+
+def test_async_memory_accepts_sync_summarizer():
+    async def main():
+        mem = AsyncRollingMemory(
+            max_tokens=6,
+            token_counter=char_counter,
+            summarize_fn=fake_summarizer,
+        )
+        await mem.add_user_message("aaaa")
+        await mem.add_assistant_message("bbbb")
+        assert mem.summary == "aaaa"
+        assert [m.content for m in mem.buffer] == ["bbbb"]
+
+    asyncio.run(main())
+
+
+def test_async_eviction_without_summarizer_drops_messages():
+    async def main():
+        mem = AsyncRollingMemory(max_tokens=6, token_counter=char_counter)
+        await mem.add_user_message("aaaa")
+        await mem.add_assistant_message("bbbb")
+        assert mem.summary == ""
+        assert [m.content for m in mem.buffer] == ["bbbb"]
+
+    asyncio.run(main())
+
+
+def test_async_summarizer_failure_does_not_lose_messages():
+    async def main():
+        async def failing_summarizer(existing, evicted):
+            await asyncio.sleep(0)
+            raise RuntimeError("LLM unavailable")
+
+        mem = AsyncRollingMemory(
+            max_tokens=4,
+            token_counter=char_counter,
+            summarize_fn=failing_summarizer,
+        )
+        await mem.add_user_message("aaaa")
+        with pytest.raises(RuntimeError):
+            await mem.add_assistant_message("bbbb")
+
+        assert mem.summary == ""
+        assert [m.content for m in mem.buffer] == ["aaaa", "bbbb"]
+
+    asyncio.run(main())
+
+
+def test_sync_memory_rejects_async_summarizer():
+    async def async_summarizer(existing, evicted):
+        return existing
+
+    # Coroutine functions are caught at construction, before any data exists.
+    with pytest.raises(TypeError, match="AsyncRollingMemory"):
+        RollingMemory(max_tokens=4, summarize_fn=async_summarizer)
+
+    # Objects with an async __call__ pass the constructor check; the prune
+    # guard catches them instead of silently storing a coroutine as summary.
+    class AsyncCallable:
+        async def __call__(self, existing, evicted):
+            return existing
+
+    mem = RollingMemory(
+        max_tokens=4, token_counter=char_counter, summarize_fn=AsyncCallable()
+    )
+    mem.add_user_message("aaaa")
+    with warnings.catch_warnings():
+        # A leaked never-awaited coroutine would fail the test.
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(TypeError, match="AsyncRollingMemory"):
+            mem.add_assistant_message("bbbb")
+
+    assert mem.summary == ""
+    assert [m.content for m in mem.buffer] == ["aaaa", "bbbb"]
+
+
+def test_async_concurrent_adds_during_inflight_summarize():
+    async def main():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def blocking_summarizer(existing, evicted):
+            calls.append([m.content for m in evicted])
+            entered.set()
+            await release.wait()
+            return (existing + " " + " ".join(m.content for m in evicted)).strip()
+
+        mem = AsyncRollingMemory(
+            max_tokens=4,
+            token_counter=char_counter,
+            summarize_fn=blocking_summarizer,
+        )
+        await mem.add_user_message("aa")
+        await mem.add_assistant_message("bb")  # 4 tokens, fits
+
+        # Over budget: this prune blocks inside the summarizer.
+        t1 = asyncio.create_task(mem.add_user_message("cccc"))
+        await entered.wait()
+        # Nothing deleted before the summarize call resolves.
+        assert [m.content for m in mem.buffer][:2] == ["aa", "bb"]
+
+        # A concurrent add appends and parks its prune on the lock.
+        t2 = asyncio.create_task(mem.add_user_message("dddd"))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(t1, t2)
+
+        # The second prune recomputed its cutoff against the post-eviction
+        # buffer: no double-evict, no lost message.
+        assert calls == [["aa", "bb"], ["cccc"]]
+        assert [m.content for m in mem.buffer] == ["dddd"]
+        assert mem.summary == "aa bb cccc"
+
+    asyncio.run(main())
+
+
+def test_clear_during_inflight_summarize_discards_fold():
+    async def main():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_summarizer(existing, evicted):
+            entered.set()
+            await release.wait()
+            return (existing + " " + " ".join(m.content for m in evicted)).strip()
+
+        mem = AsyncRollingMemory(
+            max_tokens=4,
+            token_counter=char_counter,
+            summarize_fn=blocking_summarizer,
+        )
+        await mem.add_user_message("aa")
+        await mem.add_assistant_message("bb")
+
+        task = asyncio.create_task(mem.add_user_message("cccc"))
+        await entered.wait()
+        mem.clear()
+        release.set()
+        await task
+
+        # The clear wins: the in-flight fold is discarded, nothing resurrects.
+        assert mem.summary == ""
+        assert mem.buffer == []
+
+    asyncio.run(main())
+
+
+def test_async_from_dict_round_trip():
+    async def main():
+        sync_mem = RollingMemory(max_tokens=100, token_counter=char_counter)
+        sync_mem.add_user_message("bbbb")
+        sync_mem.summary = "earlier"
+
+        # State saved by the sync class loads in the async one unchanged.
+        mem = AsyncRollingMemory.from_dict(
+            sync_mem.to_dict(),
+            max_tokens=6,
+            token_counter=char_counter,
+            summarize_fn=async_fake_summarizer,
+        )
+        assert [m.content for m in mem.buffer] == ["bbbb"]
+
+        # Re-injected async callback is live: a new turn triggers eviction.
+        await mem.add_assistant_message("cccc")
+        assert mem.summary == "earlier bbbb"
+        assert [m.content for m in mem.buffer] == ["cccc"]
+
+    asyncio.run(main())
