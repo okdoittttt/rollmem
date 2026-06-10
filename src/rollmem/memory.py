@@ -13,14 +13,15 @@ counter and a no-op summarizer in tests).
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .message import ASSISTANT, SYSTEM, USER, Message
+from .message import ASSISTANT, SYSTEM, TOOL, USER, Message, ToolCall
 
 SummarizeFn = Callable[[str, Sequence[Message]], str]
 TokenCounter = Callable[[str], int]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+_READABLE_VERSIONS = (1, 2)
 
 
 def _default_token_counter(text: str) -> int:
@@ -44,7 +45,11 @@ class RollingMemory:
     Args:
         max_tokens: token budget for the verbatim buffer. When the buffer
             exceeds this, the oldest messages are folded into the summary until
-            it fits again. This bounds the buffer only, not the summary, and is
+            it fits again. Folding is atomic over tool-call units: an assistant
+            message with ``tool_calls`` and its linked tool results are evicted
+            together or kept together, so the buffer never starts with an
+            orphaned tool result.
+            This bounds the buffer only, not the summary, and is
             unrelated to a model's generation ``max_tokens`` (output limit) — it
             is purely the size of the recent-message buffer rollmem keeps.
         summarize_fn: callback that produces an updated summary from the current
@@ -71,8 +76,26 @@ class RollingMemory:
 
     # -- adding turns -----------------------------------------------------
 
-    def add_message(self, role: str, content: str) -> None:
-        self.buffer.append(Message(role=role, content=content))
+    def add_message(
+        self,
+        role: str,
+        content: str,
+        *,
+        id: Optional[str] = None,
+        tool_calls: Sequence[ToolCall] = (),
+        tool_call_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        self.buffer.append(
+            Message(
+                role=role,
+                content=content,
+                id=id,
+                tool_calls=tuple(tool_calls),
+                tool_call_id=tool_call_id,
+                metadata=dict(metadata) if metadata else {},
+            )
+        )
         self._prune()
 
     def add_user_message(self, content: str) -> None:
@@ -83,6 +106,11 @@ class RollingMemory:
 
     def add_system_message(self, content: str) -> None:
         self.add_message(SYSTEM, content)
+
+    def add_tool_message(
+        self, content: str, *, tool_call_id: Optional[str] = None
+    ) -> None:
+        self.add_message(TOOL, content, tool_call_id=tool_call_id)
 
     # -- reading back -----------------------------------------------------
 
@@ -162,7 +190,7 @@ class RollingMemory:
             ValueError: If ``data`` has an unsupported serialization version.
         """
         version = data.get("version")
-        if version != SCHEMA_VERSION:
+        if version not in _READABLE_VERSIONS:
             raise ValueError(f"unsupported serialization version: {version!r}")
         memory = cls(
             max_tokens=max_tokens,
@@ -176,34 +204,88 @@ class RollingMemory:
     # -- internals --------------------------------------------------------
 
     def _buffer_tokens(self) -> int:
-        return sum(self._token_counter(m.content) for m in self.buffer)
+        return sum(self._token_counter(m.token_text()) for m in self.buffer)
+
+    def _units(self) -> List[Tuple[int, int]]:
+        """Partition the buffer into atomic eviction units.
+
+        A unit is a contiguous ``(start, end)`` span (inclusive indices) that
+        must be evicted or kept as a whole, so a tool call and its results are
+        never split across the summary/buffer boundary:
+
+        * An assistant message carrying ``tool_calls`` spans from itself
+          through the last buffer message whose ``tool_call_id`` answers one of
+          its calls — including any unrelated messages interleaved in between.
+        * A tool-call message whose results are not (yet) in the buffer, a
+          tool result whose call is absent (e.g. restored from a truncated
+          save), and every ordinary message each form a single-message unit.
+        * Overlapping spans are merged into one unit.
+
+        Returns:
+            The unit spans, in order, covering the whole buffer.
+        """
+        last_result: Dict[str, int] = {}
+        for j, message in enumerate(self.buffer):
+            if message.tool_call_id is not None:
+                last_result[message.tool_call_id] = j
+
+        end_of = list(range(len(self.buffer)))
+        for i, message in enumerate(self.buffer):
+            if message.tool_calls:
+                end_of[i] = max(
+                    [i] + [last_result.get(tc.id, i) for tc in message.tool_calls]
+                )
+
+        units: List[Tuple[int, int]] = []
+        i = 0
+        while i < len(self.buffer):
+            end = end_of[i]
+            j = i
+            while j <= end:
+                end = max(end, end_of[j])
+                j += 1
+            units.append((i, end))
+            i = end + 1
+        return units
 
     def _prune(self) -> None:
-        """Fold oldest messages into the summary until the buffer fits budget.
+        """Fold the oldest units into the summary until the buffer fits budget.
+
+        Eviction operates on the atomic units of :meth:`_units`, never on
+        fractions of one, so the buffer never starts with an orphaned tool
+        result. At least the most recent unit is always kept, even when it
+        alone exceeds the budget.
 
         Eviction is computed first, then summarized in a single ``summarize_fn``
         call, and only after that succeeds are the messages dropped from the
         buffer. This keeps the summarizer call cheap (one call, not one per
-        message) and means a summarizer failure leaves the buffer untouched
+        unit) and means a summarizer failure leaves the buffer untouched
         rather than silently losing turns.
         """
-        # Figure out how many of the oldest messages must go, without mutating
-        # the buffer yet. Always keep at least one message in the buffer.
-        tokens = self._buffer_tokens()
+        if not self.buffer:
+            return
+
+        units = self._units()
+        unit_tokens = [
+            sum(
+                self._token_counter(m.token_text())
+                for m in self.buffer[start : end + 1]
+            )
+            for start, end in units
+        ]
+        total = sum(unit_tokens)
         evict_count = 0
-        while (
-            len(self.buffer) - evict_count > 1
-            and tokens > self.max_tokens
-        ):
-            tokens -= self._token_counter(self.buffer[evict_count].content)
+        while len(units) - evict_count > 1 and total > self.max_tokens:
+            total -= unit_tokens[evict_count]
             evict_count += 1
 
         if evict_count == 0:
             return
 
-        evicted = self.buffer[:evict_count]
+        cutoff = units[evict_count - 1][1] + 1
+        evicted = self.buffer[:cutoff]
         if self._summarize_fn is not None:
             # If this raises, we have not touched the buffer yet — no data loss.
             self.summary = self._summarize_fn(self.summary, evicted)
 
-        del self.buffer[:evict_count]
+        del self.buffer[:cutoff]
