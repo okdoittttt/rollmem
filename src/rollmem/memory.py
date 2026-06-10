@@ -51,6 +51,26 @@ def _default_token_counter(text: str) -> int:
     return len(text.split())
 
 
+def _response_like(message: Message) -> bool:
+    """Whether ``message`` is a response-style turn that cannot open a buffer.
+
+    Used by the eviction boundary alignment: most provider APIs reject a
+    history whose first message is an assistant turn, a tool turn, or a tool
+    result whose call is missing. At an eviction-unit head a message carrying
+    ``tool_call_id`` is by definition an orphaned result — if its call were in
+    the buffer, ``_units`` would have merged the result into the call's unit
+    and it could not be a head — so the structural check has no false
+    positives there. Custom role strings are never treated as response-like.
+
+    Args:
+        message: The message at a candidate buffer head.
+
+    Returns:
+        ``True`` if the message must not be the first turn of the buffer.
+    """
+    return message.role in (ASSISTANT, TOOL) or message.tool_call_id is not None
+
+
 def _load_state(memory: _RollingMemoryBase, data: Mapping[str, Any]) -> None:
     """Validate the schema version of ``data`` and restore summary and buffer.
 
@@ -190,9 +210,17 @@ class _RollingMemoryBase:
         """Compute how much of the buffer must go for it to fit the budget.
 
         Eviction operates on the atomic units of :meth:`_units`, never on
-        fractions of one, so the buffer never starts with an orphaned tool
-        result. At least the most recent unit is always kept, even when it
-        alone exceeds the budget.
+        fractions of one. At least the most recent unit is always kept, even
+        when it alone exceeds the budget.
+
+        Once the token-based cutoff is found, it is aligned to a valid buffer
+        boundary: if the first surviving message is response-like (assistant,
+        tool, or an orphaned tool result — see :func:`_response_like`), the
+        eviction extends over whole units up to the first survivor that is
+        not, since most provider APIs reject histories opening with such a
+        turn. When no such boundary exists before the last unit, the cutoff
+        is left at the token-based position — evicting more could not fix the
+        head, so the context is kept instead.
 
         Returns:
             The buffer index up to which (exclusive) messages should be
@@ -217,6 +245,13 @@ class _RollingMemoryBase:
 
         if evict_count == 0:
             return 0
+
+        k = evict_count
+        while k < len(units) - 1 and _response_like(self.buffer[units[k][0]]):
+            k += 1
+        if not _response_like(self.buffer[units[k][0]]):
+            evict_count = k
+
         return units[evict_count - 1][1] + 1
 
 
@@ -238,8 +273,10 @@ class RollingMemory(_RollingMemoryBase):
             exceeds this, the oldest messages are folded into the summary until
             it fits again. Folding is atomic over tool-call units: an assistant
             message with ``tool_calls`` and its linked tool results are evicted
-            together or kept together, so the buffer never starts with an
-            orphaned tool result.
+            together or kept together. The eviction boundary is then aligned so
+            that, whenever possible, the buffer does not start with an
+            assistant turn, a tool turn, or an orphaned tool result — openings
+            most provider APIs reject.
             This bounds the buffer only, not the summary, and is
             unrelated to a model's generation ``max_tokens`` (output limit) — it
             is purely the size of the recent-message buffer rollmem keeps.
@@ -391,8 +428,9 @@ class RollingMemory(_RollingMemoryBase):
 class AsyncRollingMemory(_RollingMemoryBase):
     """Asyncio variant of :class:`RollingMemory`.
 
-    Behaves identically to the synchronous class — same tool-call eviction
-    units, same single-call summarize semantics, same serialization format
+    Behaves identically to the synchronous class — same eviction units and
+    boundary alignment, same single-call summarize semantics, same
+    serialization format
     (state saved by one class loads in the other) — except that the ``add_*``
     methods are coroutines and ``summarize_fn`` may be either a regular
     function or a coroutine function; an awaitable result is awaited.
