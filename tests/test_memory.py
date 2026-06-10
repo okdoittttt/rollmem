@@ -501,6 +501,257 @@ def test_from_dict_accepts_version_1_payload():
         RollingMemory.from_dict({"version": 3, "summary": "", "buffer": []})
 
 
+# -- boundary alignment ---------------------------------------------------
+
+
+def test_eviction_aligns_to_user_boundary():
+    calls = []
+
+    def counting_summarizer(existing, evicted):
+        calls.append([m.content for m in evicted])
+        return (existing + " " + " ".join(m.content for m in evicted)).strip()
+
+    mem = RollingMemory(
+        max_tokens=10,
+        token_counter=char_counter,
+        summarize_fn=counting_summarizer,
+    )
+    mem.add_user_message("aaaa")  # 4
+    mem.add_assistant_message("bbbb")  # 4 -> total 8, fits
+    # 12 > 10: tokens alone would evict only "aaaa" and leave the buffer
+    # starting with an assistant turn; alignment extends over "bbbb" too.
+    mem.add_user_message("cccc")
+
+    assert calls == [["aaaa", "bbbb"]]
+    assert [m.content for m in mem.buffer] == ["cccc"]
+    assert mem.buffer[0].role == "user"
+
+
+def test_alignment_cascades_over_consecutive_response_units():
+    calls = []
+
+    def counting_summarizer(existing, evicted):
+        calls.append([m.content for m in evicted])
+        return existing
+
+    mem = RollingMemory(
+        max_tokens=12,
+        token_counter=char_counter,
+        summarize_fn=counting_summarizer,
+    )
+    mem.add_user_message("aaaa")  # 4
+    mem.add_assistant_message("bb")  # 2
+    mem.add_assistant_message("cc")  # 2
+    mem.add_user_message("dddd")  # 4 -> total 12, fits
+    mem.add_user_message("ee")  # 14 > 12: evict "aaaa", then align past both
+    # assistant turns to the next user turn.
+
+    assert calls == [["aaaa", "bb", "cc"]]
+    assert [m.content for m in mem.buffer] == ["dddd", "ee"]
+
+
+def test_alignment_extends_over_whole_tool_unit():
+    calls = []
+
+    def counting_summarizer(existing, evicted):
+        calls.append(list(evicted))
+        return existing
+
+    mem = RollingMemory(
+        max_tokens=20,
+        token_counter=char_counter,
+        summarize_fn=counting_summarizer,
+    )
+    mem.add_user_message("aaaa")  # 4
+    mem.add_message(
+        ASSISTANT, "", tool_calls=[ToolCall(id="c1", name="f", arguments="xx")]
+    )  # "f(xx)" -> 5
+    mem.add_tool_message("rrrr", tool_call_id="c1")  # "rrrr\nc1" -> 7
+    mem.add_user_message("zzzz")  # 4 -> total 20, fits
+    mem.add_user_message("ww")  # 22 > 20: evict "aaaa", then alignment takes
+    # the whole tool pair, not just the call.
+
+    assert len(calls) == 1
+    assert [m.role for m in calls[0]] == ["user", ASSISTANT, TOOL]
+    assert [m.content for m in mem.buffer] == ["zzzz", "ww"]
+
+
+def test_alignment_skipped_when_all_heads_response_like():
+    mem = RollingMemory(
+        max_tokens=8,
+        token_counter=char_counter,
+        summarize_fn=fake_summarizer,
+    )
+    mem.add_assistant_message("aaaa")  # 4
+    mem.add_assistant_message("bbbb")  # 4 -> total 8, fits
+    mem.add_assistant_message("cccc")  # 12 > 8
+
+    # Every candidate head is assistant: extending could not produce a valid
+    # head, so only the token-based eviction happens and context is kept.
+    assert mem.summary == "aaaa"
+    assert [m.content for m in mem.buffer] == ["bbbb", "cccc"]
+
+
+def test_orphan_tool_result_head_evicted_by_alignment():
+    saved = {
+        "version": 2,
+        "summary": "",
+        "buffer": [
+            {"role": "user", "content": "aaaa"},
+            {"role": "tool", "content": "rr", "tool_call_id": "gone"},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    mem = RollingMemory.from_dict(
+        saved,
+        max_tokens=12,
+        token_counter=char_counter,
+        summarize_fn=fake_summarizer,
+    )
+    assert len(mem.buffer) == 3  # restored verbatim, no prune on load
+
+    # 13 + 2 > 12: tokens alone would evict only "aaaa" and leave the orphan
+    # ("rr\ngone" -> 7) at the head; alignment evicts it too.
+    mem.add_user_message("zz")
+
+    assert [m.content for m in mem.buffer] == ["hi", "zz"]
+    assert mem.buffer[0].tool_call_id is None
+    assert "rr" in mem.summary
+
+
+def test_orphan_with_custom_role_evicted_by_alignment():
+    saved = {
+        "version": 2,
+        "summary": "",
+        "buffer": [
+            {"role": "user", "content": "aaaa"},
+            {"role": "function", "content": "rr", "tool_call_id": "gone"},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    mem = RollingMemory.from_dict(
+        saved,
+        max_tokens=12,
+        token_counter=char_counter,
+        summarize_fn=fake_summarizer,
+    )
+    # The role string matches nothing, but tool_call_id marks the message as
+    # an orphaned result regardless of role.
+    mem.add_user_message("zz")
+
+    assert [m.content for m in mem.buffer] == ["hi", "zz"]
+    assert mem.buffer[0].tool_call_id is None
+
+
+def test_custom_role_head_survives_alignment():
+    mem = RollingMemory(
+        max_tokens=10,
+        token_counter=char_counter,
+        summarize_fn=fake_summarizer,
+    )
+    mem.add_user_message("aaaa")  # 4
+    mem.add_message("note", "bbbb")  # 4 -> total 8, fits
+    mem.add_user_message("cccc")  # 12 > 10
+
+    # Custom roles are never treated as response-like: no extra eviction.
+    assert mem.summary == "aaaa"
+    assert [m.content for m in mem.buffer] == ["bbbb", "cccc"]
+
+
+def test_system_head_survives_alignment():
+    mem = RollingMemory(
+        max_tokens=10,
+        token_counter=char_counter,
+        summarize_fn=fake_summarizer,
+    )
+    mem.add_user_message("aaaa")  # 4
+    mem.add_system_message("bbbb")  # 4 -> total 8, fits
+    mem.add_user_message("cccc")  # 12 > 10
+
+    # System turns may open a buffer; folding instructions away would be worse.
+    assert mem.summary == "aaaa"
+    assert [m.content for m in mem.buffer] == ["bbbb", "cccc"]
+
+
+def test_alignment_without_summarizer_drops_aligned_prefix():
+    mem = RollingMemory(max_tokens=10, token_counter=char_counter)
+    mem.add_user_message("aaaa")
+    mem.add_assistant_message("bbbb")
+    mem.add_user_message("cccc")
+
+    assert mem.summary == ""
+    assert [m.content for m in mem.buffer] == ["cccc"]
+
+
+def test_restored_assistant_first_buffer_untouched_within_budget():
+    saved = {
+        "version": 2,
+        "summary": "",
+        "buffer": [
+            {"role": "assistant", "content": "bb"},
+            {"role": "user", "content": "cc"},
+        ],
+    }
+    mem = RollingMemory.from_dict(
+        saved,
+        max_tokens=100,
+        token_counter=char_counter,
+        summarize_fn=fake_summarizer,
+    )
+    mem.add_user_message("dd")
+
+    # Alignment only runs when an eviction triggers; a within-budget buffer is
+    # never touched, even if it starts with an assistant turn.
+    assert mem.summary == ""
+    assert mem.buffer[0].role == ASSISTANT
+    assert len(mem.buffer) == 3
+
+
+def test_summarizer_failure_with_alignment_loses_nothing():
+    def failing_summarizer(existing, evicted):
+        raise RuntimeError("LLM unavailable")
+
+    mem = RollingMemory(
+        max_tokens=10,
+        token_counter=char_counter,
+        summarize_fn=failing_summarizer,
+    )
+    mem.add_user_message("aaaa")
+    mem.add_assistant_message("bbbb")
+    with pytest.raises(RuntimeError):
+        mem.add_user_message("cccc")
+
+    # The aligned (larger) eviction still happens in one pre-delete summarize
+    # call, so a failure leaves the whole buffer intact.
+    assert mem.summary == ""
+    assert [m.content for m in mem.buffer] == ["aaaa", "bbbb", "cccc"]
+
+
+def test_async_alignment_inherits():
+    async def main():
+        calls = []
+
+        async def counting_summarizer(existing, evicted):
+            calls.append([m.content for m in evicted])
+            await asyncio.sleep(0)
+            return (existing + " " + " ".join(m.content for m in evicted)).strip()
+
+        mem = AsyncRollingMemory(
+            max_tokens=10,
+            token_counter=char_counter,
+            summarize_fn=counting_summarizer,
+        )
+        await mem.add_user_message("aaaa")
+        await mem.add_assistant_message("bbbb")
+        await mem.add_user_message("cccc")
+
+        assert calls == [["aaaa", "bbbb"]]
+        assert [m.content for m in mem.buffer] == ["cccc"]
+        assert mem.buffer[0].role == "user"
+
+    asyncio.run(main())
+
+
 # -- async memory --------------------------------------------------------
 
 
