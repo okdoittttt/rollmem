@@ -57,6 +57,10 @@ mem = RollingMemory.from_dict(
 )
 ```
 
+`AsyncRollingMemory` has the same `to_dict()` / `from_dict()` and the same
+format, so state saved by either class loads in the other — for example, a
+conversation recorded synchronously can be resumed in an asyncio app.
+
 ## What is saved, and what is not
 
 | | Saved by `to_dict()` | Passed again to `from_dict()` |

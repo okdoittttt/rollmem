@@ -6,8 +6,9 @@ rollmem keeps two pieces of state:
 - **`summary`** — a running summary of everything that has been evicted from
   the buffer, as a plain `str`.
 
-Both are exposed as public attributes on `RollingMemory`, so you can always
-inspect (or even adjust) the live state.
+Both are exposed as public attributes on `RollingMemory` and
+`AsyncRollingMemory`, so you can always inspect (or even adjust) the live
+state.
 
 ## The lifecycle of a turn
 
@@ -68,6 +69,27 @@ This has two practical consequences:
   many turns are evicted at once.
 - **Failure safety.** If `summarize_fn` raises, the buffer is untouched: no
   turns are lost, and the exception propagates to you.
+
+## Sync and async {#sync-and-async}
+
+`AsyncRollingMemory` shares all of the above — the same units, the same
+conservative pruning, the same serialization format — with `summarize_fn`
+allowed to be a coroutine function (a regular function works too). The
+async-specific guarantees:
+
+- **Prunes are serialized.** An internal lock ensures only one prune runs at
+  a time, so concurrent tasks never double-evict or overwrite each other's
+  summary. Messages added while a summarize call is in flight simply land at
+  the tail of the buffer and are never lost.
+- **Failure safety carries over.** If the summarizer raises — or the task is
+  cancelled mid-`await` — the buffer is untouched, exactly as in the sync
+  class.
+- **`clear()` wins.** Calling `clear()` while a summarize call is in flight
+  discards that fold's result instead of resurrecting the cleared
+  conversation.
+- **Task-safe, not thread-safe.** One instance is safe across asyncio tasks
+  on a single event loop, but must not be shared across threads or event
+  loops.
 
 ## Token counting
 

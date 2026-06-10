@@ -8,6 +8,14 @@ This reference is generated from the source docstrings.
 ## RollingMemory
 
 ::: rollmem.RollingMemory
+    options:
+      inherited_members: true
+
+## AsyncRollingMemory
+
+::: rollmem.AsyncRollingMemory
+    options:
+      inherited_members: true
 
 ## Message
 
@@ -24,11 +32,15 @@ would otherwise tie it to an LLM provider:
 
 ```python
 SummarizeFn = Callable[[str, Sequence[Message]], str]
+AsyncSummarizeFn = Callable[[str, Sequence[Message]], Awaitable[str]]
 TokenCounter = Callable[[str], int]
 ```
 
 - **`SummarizeFn`** — `summarize_fn(existing_summary, messages_to_fold)`
   returns the new summary. Called once per prune with all evicted messages.
+- **`AsyncSummarizeFn`** — the coroutine form of the same callback, accepted
+  by `AsyncRollingMemory` (which also accepts a plain `SummarizeFn`). Passing
+  a coroutine function to the synchronous `RollingMemory` raises `TypeError`.
 - **`TokenCounter`** — `token_counter(text)` returns the token count of a
   single message's text. Defaults to a word-count estimate. The text passed in
   is `Message.token_text()` — the content plus any tool-call names, arguments,

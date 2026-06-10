@@ -88,6 +88,47 @@ mem = RollingMemory(max_tokens=2000, summarize_fn=summarize)
     instruct it to compress, or cap its length inside the callback. See
     [How It Works](how-it-works.md#limitations).
 
+## Using it in async applications
+
+In asyncio code, use `AsyncRollingMemory`. It behaves identically — same
+eviction units, same serialization format — but the `add_*` methods are
+coroutines and `summarize_fn` may be a coroutine function:
+
+```python
+from anthropic import AsyncAnthropic
+from rollmem import AsyncRollingMemory
+
+client = AsyncAnthropic()
+
+async def summarize(existing_summary, messages):
+    folded = "\n".join(str(m) for m in messages)
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=500,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Update this running conversation summary with the new turns.\n"
+                "Keep it under 200 words; compress, do not just append.\n\n"
+                f"Current summary:\n{existing_summary or '(empty)'}\n\n"
+                f"New turns:\n{folded}"
+            ),
+        }],
+    )
+    return response.content[0].text
+
+mem = AsyncRollingMemory(max_tokens=2000, summarize_fn=summarize)
+
+await mem.add_user_message("Hi, I'm planning a trip to Korea.")
+```
+
+A regular (synchronous) `summarize_fn` is accepted too, so you can switch
+classes without rewriting the callback. The reverse is guarded: passing a
+coroutine function to the synchronous `RollingMemory` raises `TypeError`
+instead of silently storing a coroutine as the summary. See
+[How It Works](how-it-works.md#sync-and-async) for the concurrency
+guarantees.
+
 ## Counting tokens accurately
 
 The default token counter is a rough word count — fine for demos, but inject

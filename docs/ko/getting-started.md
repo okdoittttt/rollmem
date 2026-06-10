@@ -88,6 +88,45 @@ mem = RollingMemory(max_tokens=2000, summarize_fn=summarize)
     지시하거나, 콜백 안에서 길이를 제한하세요.
     [동작 원리](how-it-works.md#limitations)를 참고하세요.
 
+## 비동기 앱에서 사용하기
+
+asyncio 코드에서는 `AsyncRollingMemory`를 사용하세요. 동작은 동일하지만 —
+같은 퇴출 유닛, 같은 직렬화 포맷 — `add_*` 메서드가 코루틴이고
+`summarize_fn`으로 코루틴 함수를 받을 수 있습니다:
+
+```python
+from anthropic import AsyncAnthropic
+from rollmem import AsyncRollingMemory
+
+client = AsyncAnthropic()
+
+async def summarize(existing_summary, messages):
+    folded = "\n".join(str(m) for m in messages)
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=500,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Update this running conversation summary with the new turns.\n"
+                "Keep it under 200 words; compress, do not just append.\n\n"
+                f"Current summary:\n{existing_summary or '(empty)'}\n\n"
+                f"New turns:\n{folded}"
+            ),
+        }],
+    )
+    return response.content[0].text
+
+mem = AsyncRollingMemory(max_tokens=2000, summarize_fn=summarize)
+
+await mem.add_user_message("Hi, I'm planning a trip to Korea.")
+```
+
+일반(동기) `summarize_fn`도 받으므로, 콜백을 다시 쓰지 않고도 클래스를 바꿀
+수 있습니다. 반대 방향은 막혀 있습니다: 동기 `RollingMemory`에 코루틴 함수를
+넘기면 코루틴이 요약으로 조용히 저장되는 대신 `TypeError`가 발생합니다.
+동시성 보장은 [동작 원리](how-it-works.md#sync-and-async)를 참고하세요.
+
 ## 토큰을 정확하게 세기 {#counting-tokens-accurately}
 
 기본 토큰 카운터는 대략적인 단어 수 계산입니다 — 데모에는 충분하지만, 실제

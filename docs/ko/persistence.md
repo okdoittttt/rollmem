@@ -55,6 +55,10 @@ mem = RollingMemory.from_dict(
 )
 ```
 
+`AsyncRollingMemory`도 같은 `to_dict()` / `from_dict()`와 같은 포맷을
+가지므로, 한 클래스가 저장한 상태를 다른 클래스에서 불러올 수 있습니다 —
+예를 들어 동기로 기록한 대화를 asyncio 앱에서 이어갈 수 있습니다.
+
 ## 저장되는 것과 저장되지 않는 것
 
 | | `to_dict()`로 저장 | `from_dict()`에 다시 전달 |

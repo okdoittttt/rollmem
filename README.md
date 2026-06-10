@@ -73,6 +73,27 @@ A tool call and its results are an atomic unit: pruning evicts them together
 or keeps them together, so the buffer never starts with an orphaned tool
 result that a provider API would reject.
 
+In asyncio applications, use `AsyncRollingMemory` — same behaviour and
+serialization format, but the `add_*` methods are coroutines and
+`summarize_fn` may be a coroutine function:
+
+```python
+from rollmem import AsyncRollingMemory
+
+async def summarize(existing_summary, messages):
+    folded = " ".join(m.content for m in messages)
+    return (existing_summary + " " + folded).strip()   # await your LLM here
+
+mem = AsyncRollingMemory(max_tokens=2000, summarize_fn=summarize)
+
+await mem.add_user_message("Hi, I'm planning a trip to Korea.")
+```
+
+`AsyncRollingMemory` is safe for concurrent use by multiple asyncio tasks on
+one event loop — pruning is serialized internally, and a summarizer failure
+never loses turns. It is not thread-safe, and one instance must stay on one
+event loop.
+
 `max_tokens` is the budget for the **verbatim recent-message buffer** — not the
 running summary, and not a model's generation `max_tokens` (output limit). When
 the buffer exceeds it, the oldest turns are folded into the summary.
@@ -136,6 +157,13 @@ re-applied on the next added message.
 - `clear()` — reset the summary and buffer.
 - `summary: str` and `buffer: list[Message]` — the live state, exposed as plain
   public attributes.
+
+`AsyncRollingMemory(max_tokens=2000, summarize_fn=None, token_counter=None)` is
+the asyncio variant: the same API, but the `add_*` methods are coroutines and
+`summarize_fn` may be a regular or coroutine function (`AsyncSummarizeFn`).
+Reads, `clear()`, and serialization stay synchronous, and state saved by either
+class loads in the other. Passing a coroutine function as `summarize_fn` to the
+synchronous `RollingMemory` raises `TypeError` instead of failing silently.
 
 `Message(role, content, id=None, tool_calls=(), tool_call_id=None, metadata={})`
 is the provider-neutral turn type: a frozen dataclass with `to_dict()` /
