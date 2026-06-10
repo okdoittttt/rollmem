@@ -50,11 +50,28 @@ mem = RollingMemory(
 
 mem.add_user_message("Hi, I'm planning a trip to Korea.")
 mem.add_assistant_message("Great! When are you going?")
-mem.add_message("tool", "weather: sunny")   # any role string works
 
 print(mem.get_context())    # -> str: summary (as a system turn) + buffer, joined
 print(mem.get_messages())   # -> list[Message]: summary prepended as a system turn
 ```
+
+Agentic conversations work too — messages can carry tool calls, an id, and
+opaque metadata:
+
+```python
+from rollmem import ASSISTANT, ToolCall
+
+mem.add_message(
+    ASSISTANT,
+    "",
+    tool_calls=[ToolCall(id="c1", name="get_weather", arguments='{"city": "Seoul"}')],
+)
+mem.add_tool_message("sunny, 23C", tool_call_id="c1")
+```
+
+A tool call and its results are an atomic unit: pruning evicts them together
+or keeps them together, so the buffer never starts with an orphaned tool
+result that a provider API would reject.
 
 `max_tokens` is the budget for the **verbatim recent-message buffer** — not the
 running summary, and not a model's generation `max_tokens` (output limit). When
@@ -62,7 +79,9 @@ the buffer exceeds it, the oldest turns are folded into the summary.
 
 `token_counter` takes a single message's text (`str`) and returns an `int`. The
 default is a crude word count — fine for demos, but pass a model-accurate counter
-(such as `tiktoken`) for real token budgets.
+(such as `tiktoken`) for real token budgets. The text it receives is
+`Message.token_text()` — the content plus any tool-call names, arguments, and
+linkage — so tool payloads count toward the budget.
 
 ## Persistence
 
@@ -90,7 +109,9 @@ re-applied on the next added message.
 
 - New turns go into `buffer`.
 - When `buffer` exceeds `max_tokens`, the oldest turns are folded into `summary`
-  via `summarize_fn` (or dropped if none is provided).
+  via `summarize_fn` (or dropped if none is provided). Eviction is atomic over
+  tool-call units — an assistant message with `tool_calls` and its linked tool
+  results always travel together.
 - `get_messages() -> list[Message]` returns the buffer with the summary
   prepended as a `system` turn. `get_context() -> str` is the string form of
   the same thing (prompt-ready), so the two never diverge. Neither adds a
@@ -101,10 +122,13 @@ re-applied on the next added message.
 
 `RollingMemory(max_tokens=2000, summarize_fn=None, token_counter=None)`
 
-- `add_message(role, content)` — append a turn with **any** role string.
-- `add_user_message` / `add_assistant_message` / `add_system_message` —
-  convenience wrappers over `add_message` using the `USER` / `ASSISTANT` /
-  `SYSTEM` role constants.
+- `add_message(role, content, *, id=None, tool_calls=(), tool_call_id=None, metadata=None)`
+  — append a turn with **any** role string, optionally carrying tool calls, an
+  id, and metadata.
+- `add_user_message` / `add_assistant_message` / `add_system_message` /
+  `add_tool_message` — convenience wrappers over `add_message` using the
+  `USER` / `ASSISTANT` / `SYSTEM` / `TOOL` role constants
+  (`add_tool_message` also takes `tool_call_id=`).
 - `get_messages() -> list[Message]` / `get_context() -> str` — read the state
   back (see [How it works](#how-it-works)).
 - `to_dict()` / `from_dict(data, *, max_tokens=..., summarize_fn=..., token_counter=...)`
@@ -113,10 +137,14 @@ re-applied on the next added message.
 - `summary: str` and `buffer: list[Message]` — the live state, exposed as plain
   public attributes.
 
-`Message(role, content)` is the provider-neutral turn type: a frozen dataclass
-with `to_dict()` / `from_dict()` and a `"role: content"` string form. The
-exported role constants are `USER`, `ASSISTANT`, and `SYSTEM` — but any string
-is accepted as a role.
+`Message(role, content, id=None, tool_calls=(), tool_call_id=None, metadata={})`
+is the provider-neutral turn type: a frozen dataclass with `to_dict()` /
+`from_dict()`, a `"role: content"` string form, and `token_text()` — the
+canonical text used for token counting (content plus tool-call payloads).
+`tool_calls` holds `ToolCall(id, name, arguments)` entries on assistant turns;
+`tool_call_id` links a tool-result turn back to its call; `metadata` is opaque
+and round-tripped verbatim. The exported role constants are `USER`,
+`ASSISTANT`, `SYSTEM`, and `TOOL` — but any string is accepted as a role.
 
 ## Limitations
 
